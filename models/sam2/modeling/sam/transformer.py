@@ -19,9 +19,6 @@ from models.sam2.utils.misc import get_sdpa_settings
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 OLD_GPU, USE_FLASH_ATTN, MATH_KERNEL_ON = get_sdpa_settings()
-USE_FLASH_ATTN = False
-MATH_KERNEL_ON = True
-OLD_GPU = True
 
 
 class TwoWayTransformer(nn.Module):
@@ -249,13 +246,21 @@ class Attention(nn.Module):
         v = self._separate_heads(v, self.num_heads)
 
         dropout_p = self.dropout_p if self.training else 0.0
-        # Attention
-        with torch.backends.cuda.sdp_kernel(
-            enable_flash=USE_FLASH_ATTN,
-            # if Flash attention kernel is off, then math kernel needs to be enabled
-            enable_math=(OLD_GPU and dropout_p > 0.0) or MATH_KERNEL_ON,
-            enable_mem_efficient=OLD_GPU,
-        ):
+        # Attention with FlashAttention-friendly context and safe fallback
+        try:
+            with torch.backends.cuda.sdp_kernel(
+                enable_flash=USE_FLASH_ATTN,
+                # if Flash attention kernel is off, then math kernel needs to be enabled
+                enable_math=(OLD_GPU and dropout_p > 0.0) or MATH_KERNEL_ON,
+                enable_mem_efficient=OLD_GPU,
+            ):
+                out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
+        except Exception as e:
+            warnings.warn(
+                f"Flash Attention kernel failed due to: {e}. Falling back to all available kernels for SDPA.",
+                category=UserWarning,
+                stacklevel=2,
+            )
             out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
 
         out = self._recombine_heads(out)
@@ -316,13 +321,21 @@ class RoPEAttention(Attention):
         )
 
         dropout_p = self.dropout_p if self.training else 0.0
-        # Attention
-        with torch.backends.cuda.sdp_kernel(
-            enable_flash=USE_FLASH_ATTN,
-            # if Flash attention kernel is off, then math kernel needs to be enabled
-            enable_math=(OLD_GPU and dropout_p > 0.0) or MATH_KERNEL_ON,
-            enable_mem_efficient=OLD_GPU,
-        ):
+        # Attention with FlashAttention-friendly context and safe fallback
+        try:
+            with torch.backends.cuda.sdp_kernel(
+                enable_flash=USE_FLASH_ATTN,
+                # if Flash attention kernel is off, then math kernel needs to be enabled
+                enable_math=(OLD_GPU and dropout_p > 0.0) or MATH_KERNEL_ON,
+                enable_mem_efficient=OLD_GPU,
+            ):
+                out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
+        except Exception as e:
+            warnings.warn(
+                f"Flash Attention kernel failed due to: {e}. Falling back to all available kernels for SDPA.",
+                category=UserWarning,
+                stacklevel=2,
+            )
             out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
 
         out = self._recombine_heads(out)
