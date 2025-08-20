@@ -214,3 +214,55 @@ def apply_rotary_enc(
         freqs_cis = freqs_cis.repeat(*([1] * (freqs_cis.ndim - 2)), r, 1)
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
     return xq_out.type_as(xq).to(xq.device), xk_out.type_as(xk).to(xk.device)
+
+
+def apply_rotary_enc_v2(
+    x: torch.Tensor,
+    freqs_cis: torch.Tensor,
+    repeat_freqs: int,
+):
+    # no keys to rotate, due to dropout
+    if repeat_freqs == 0:
+        assert x.shape[-2] == 0
+    if x.shape[-2] == 0:
+        return x
+
+    B, N_heads, N_tokens, C_per_head = x.shape
+    if N_tokens == freqs_cis.shape[0] * repeat_freqs:
+        x_rope = x
+        x_no_rope = None
+    else:
+        rope_tokens = freqs_cis.shape[0]
+        no_rope_tokens = N_tokens // repeat_freqs - rope_tokens
+        x = x.view(B, N_heads, repeat_freqs, N_tokens // repeat_freqs, C_per_head)
+        x_rope = x[..., no_rope_tokens:, :].reshape(B, N_heads, -1, C_per_head)
+        x_no_rope = x[..., :no_rope_tokens, :].reshape(B, N_heads, -1, C_per_head)
+
+    x_rope = torch.view_as_complex(x_rope.float().reshape(*x_rope.shape[:-1], -1, 2))
+    if repeat_freqs > 1:
+        x_one_frame = x_rope[..., : x_rope.shape[-2] // repeat_freqs, :]
+        freqs_cis = reshape_for_broadcast(freqs_cis, x_one_frame)
+    else:
+        freqs_cis = reshape_for_broadcast(freqs_cis, x_rope)
+    # repeat freqs along seq_len dim to match k seq len
+    if repeat_freqs > 1:
+        if freqs_cis.is_cuda:
+            freqs_cis = freqs_cis.repeat(*([1] * (freqs_cis.ndim - 2)), repeat_freqs, 1)
+        else:
+            # torch.repeat on complex numbers may not be supported on non-CUDA devices
+            # (freqs_cis has 4 dims and we repeat on dim 2) so we use expand + flatten
+            freqs_cis = (
+                freqs_cis.unsqueeze(2)
+                .expand(-1, -1, repeat_freqs, -1, -1)
+                .flatten(2, 3)
+            )
+    x_out = torch.view_as_real(x_rope * freqs_cis).flatten(3)
+    x_out = x_out.type_as(x).to(x.device)
+
+    if x_no_rope is not None:
+        x_out = x_out.view(B, N_heads, repeat_freqs, -1, C_per_head)
+        x_no_rope = x_no_rope.view(B, N_heads, repeat_freqs, -1, C_per_head)
+        x_out = torch.cat((x_no_rope, x_out), dim=3).view(
+            B, N_heads, N_tokens, C_per_head
+        )
+    return x_out

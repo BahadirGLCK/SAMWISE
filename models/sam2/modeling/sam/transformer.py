@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 
-from models.sam2.modeling.position_encoding import apply_rotary_enc, compute_axial_cis
+from models.sam2.modeling.position_encoding import apply_rotary_enc, apply_rotary_enc_v2, compute_axial_cis
 from models.sam2.modeling.sam2_utils import MLP
 from models.sam2.utils.misc import get_sdpa_settings
 
@@ -326,6 +326,84 @@ class RoPEAttention(Attention):
             with torch.backends.cuda.sdp_kernel(
                 enable_flash=USE_FLASH_ATTN,
                 # if Flash attention kernel is off, then math kernel needs to be enabled
+                enable_math=(OLD_GPU and dropout_p > 0.0) or MATH_KERNEL_ON,
+                enable_mem_efficient=OLD_GPU,
+            ):
+                out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
+        except Exception as e:
+            warnings.warn(
+                f"Flash Attention kernel failed due to: {e}. Falling back to all available kernels for SDPA.",
+                category=UserWarning,
+                stacklevel=2,
+            )
+            out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
+
+        out = self._recombine_heads(out)
+        out = self.out_proj(out)
+
+        return out
+
+
+class RoPEAttentionv2(Attention):
+    """Attention with rotary position encoding (v2) that supports separate Q/K sizes."""
+
+    def __init__(
+        self,
+        *args,
+        rope_theta=10000.0,
+        # whether to repeat q rope to match k length
+        # this is needed for cross-attention to memories
+        q_sizes=(32, 32),  # [w, h]
+        k_sizes=(32, 32),  # [w, h]
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+
+        self.compute_cis = partial(
+            compute_axial_cis, dim=self.internal_dim // self.num_heads, theta=rope_theta
+        )
+        self.freqs_cis_q = self.compute_cis(end_x=q_sizes[0], end_y=q_sizes[1])
+        self.freqs_cis_k = self.compute_cis(end_x=k_sizes[0], end_y=k_sizes[1])
+
+    def forward(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        num_k_exclude_rope: int = 0,
+        rope_k_repeat: int = -1,
+    ) -> Tensor:
+        # Input projections
+        q = self.q_proj(q)
+        k = self.k_proj(k)
+        v = self.v_proj(v)
+
+        # Separate into heads
+        q = self._separate_heads(q, self.num_heads)
+        k = self._separate_heads(k, self.num_heads)
+        v = self._separate_heads(v, self.num_heads)
+
+        # Apply rotary position encoding v2
+        self.freqs_cis_q = self.freqs_cis_q.to(q.device)
+        self.freqs_cis_k = self.freqs_cis_k.to(k.device)
+        q = apply_rotary_enc_v2(q, self.freqs_cis_q, repeat_freqs=1)
+        num_k_rope = k.size(-2) - num_k_exclude_rope
+        if num_k_rope < 0:
+            num_k_rope = 0
+        if num_k_rope > 0:
+            # rotate only the first num_k_rope tokens; optionally repeat across memories
+            k_rope = k[:, :, :num_k_rope]
+            k_norope = k[:, :, num_k_rope:]
+            k_rope = apply_rotary_enc_v2(
+                k_rope, self.freqs_cis_k, repeat_freqs=(rope_k_repeat if rope_k_repeat >= 0 else 1)
+            )
+            k = torch.cat([k_rope, k_norope], dim=-2)
+
+        dropout_p = self.dropout_p if self.training else 0.0
+        # Attention with FlashAttention-friendly context and safe fallback
+        try:
+            with torch.backends.cuda.sdp_kernel(
+                enable_flash=USE_FLASH_ATTN,
                 enable_math=(OLD_GPU and dropout_p > 0.0) or MATH_KERNEL_ON,
                 enable_mem_efficient=OLD_GPU,
             ):

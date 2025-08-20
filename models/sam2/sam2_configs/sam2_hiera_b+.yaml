@@ -45,10 +45,10 @@ model:
       pos_enc_at_cross_attn_keys: true
       pos_enc_at_cross_attn_queries: false
       cross_attention:
-        _target_: models.sam2.modeling.sam.transformer.RoPEAttention
+        _target_: models.sam2.modeling.sam.transformer.RoPEAttentionv2
         rope_theta: 10000.0
-        feat_sizes: [32, 32]
-        rope_k_repeat: True
+        q_sizes: [64, 64]
+        k_sizes: [64, 64]
         embedding_dim: 256
         num_heads: 1
         downsample_rate: 1

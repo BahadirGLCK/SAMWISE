@@ -9,7 +9,7 @@ from typing import Optional
 import torch
 from torch import nn, Tensor
 
-from models.sam2.modeling.sam.transformer import RoPEAttention
+from models.sam2.modeling.sam.transformer import RoPEAttention, RoPEAttentionv2
 
 from models.sam2.modeling.sam2_utils import get_activation_fn, get_clones
 
@@ -63,11 +63,14 @@ class MemoryAttentionLayer(nn.Module):
         tgt = tgt + self.dropout1(tgt2)
         return tgt
 
-    def _forward_ca(self, tgt, memory, query_pos, pos, num_k_exclude_rope=0):
+    def _forward_ca(self, tgt, memory, query_pos, pos, num_k_exclude_rope=0, rope_k_repeat=-1):
         kwds = {}
-        if num_k_exclude_rope > 0:
-            assert isinstance(self.cross_attn_image, RoPEAttention)
-            kwds = {"num_k_exclude_rope": num_k_exclude_rope}
+        if isinstance(self.cross_attn_image, RoPEAttentionv2):
+            kwds["num_k_exclude_rope"] = num_k_exclude_rope
+            kwds["rope_k_repeat"] = rope_k_repeat
+        elif isinstance(self.cross_attn_image, RoPEAttention):
+            if num_k_exclude_rope > 0:
+                kwds = {"num_k_exclude_rope": num_k_exclude_rope}
 
         # Cross-Attention
         tgt2 = self.norm2(tgt)
@@ -87,11 +90,12 @@ class MemoryAttentionLayer(nn.Module):
         pos: Optional[Tensor] = None,
         query_pos: Optional[Tensor] = None,
         num_k_exclude_rope: int = 0,
+        rope_k_repeat: int = -1,
     ) -> torch.Tensor:
 
         # Self-Attn, Cross-Attn
         tgt = self._forward_sa(tgt, query_pos)
-        tgt = self._forward_ca(tgt, memory, query_pos, pos, num_k_exclude_rope)
+        tgt = self._forward_ca(tgt, memory, query_pos, pos, num_k_exclude_rope, rope_k_repeat)
         # MLP
         tgt2 = self.norm3(tgt)
         tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))
@@ -123,6 +127,7 @@ class MemoryAttention(nn.Module):
         curr_pos: Optional[Tensor] = None,  # pos_enc for self-attention inputs
         memory_pos: Optional[Tensor] = None,  # pos_enc for cross-attention inputs
         num_obj_ptr_tokens: int = 0,  # number of object pointer *tokens*
+        num_spatial_mem: int = -1,  # number of spatial memory embeddings
     ):
         if isinstance(curr, list):
             assert isinstance(curr_pos, list)
@@ -149,7 +154,10 @@ class MemoryAttention(nn.Module):
 
         for layer in self.layers:
             kwds = {}
-            if isinstance(layer.cross_attn_image, RoPEAttention):
+            if isinstance(layer.cross_attn_image, RoPEAttentionv2):
+                kwds["num_k_exclude_rope"] = num_obj_ptr_tokens
+                kwds["rope_k_repeat"] = num_spatial_mem
+            elif isinstance(layer.cross_attn_image, RoPEAttention):
                 kwds = {"num_k_exclude_rope": num_obj_ptr_tokens}
 
             output = layer(
