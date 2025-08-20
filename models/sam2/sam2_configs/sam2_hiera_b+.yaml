@@ -111,3 +111,5 @@ model:
   use_mlp_for_obj_ptr_proj: true
   # Compilation flag
   compile_image_encoder: False
+  # Limit number of conditioning frames cross-attended in encoder (-1 means no limit)
+  max_cond_frames_in_attn: 2
