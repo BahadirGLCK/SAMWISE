@@ -469,6 +469,11 @@ def build_samwise(args):
 
     if sam2_weights:
         state_dict = torch.load(sam2_weights, map_location="cpu")["model"]
+        # Filter out backbone/FPN keys when using RepViT
+        if args.sam2_version == 'repvit':
+            state_dict = {k: v for k, v in state_dict.items() if not (
+                k.startswith('image_encoder.trunk') or k.startswith('image_encoder.neck')
+            )}
         sam.load_state_dict(state_dict, strict=False)
     sam_embed_dim = cfg.model.image_encoder.neck.backbone_channel_list[::-1][1:]
 

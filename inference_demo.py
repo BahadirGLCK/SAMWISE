@@ -183,10 +183,17 @@ def check_args(args):
         pretrained_model_link = 'https://drive.google.com/file/d/1Molt2up2bP41ekeczXWQU-LWTskKJOV2/view?usp=sharing'
         print(f'Specified path is a video or folder with frames, using video-level configuration')
         
-    if args.resume == '':
+    # For RepViT backbone we skip loading the SAMWISE checkpoint to avoid incompatible backbone weights
+    if args.sam2_version == 'repvit':
+        args.resume = ''
+    elif args.resume == '':
         args.resume = pretrained_model
 
-    assert os.path.isfile(args.resume), f"You should download the model checkpoint first. Run 'cd pretrain &&  gdown --fuzzy {pretrained_model_link}"
+    # Only enforce checkpoint presence when a resume path is expected
+    if args.resume != '':
+        assert os.path.isfile(args.resume), f"You should download the model checkpoint first. Run 'cd pretrain &&  gdown --fuzzy {pretrained_model_link}"
+
+    #assert os.path.isfile(args.resume), f"You should download the model checkpoint first. Run 'cd pretrain &&  gdown --fuzzy {pretrained_model_link}"
 
 
 if __name__ == '__main__':
