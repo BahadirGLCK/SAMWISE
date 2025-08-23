@@ -495,6 +495,24 @@ def build_samwise(args):
             # optional: print summary
             if len(filtered) > 0:
                 print(f"Loaded {len(filtered)} head/memory params from SAM2-base for RepViT.")
+
+        # Optional advanced warm-start: EdgeTAM weights
+        if getattr(args, 'use_edgetam_weights', False):
+            # Use fixed path under SAMWISE/pretrain as requested
+            edgetam_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'pretrain', 'edgetam.pt'))
+            if os.path.isfile(edgetam_path):
+                ed_sd = torch.load(edgetam_path, map_location='cpu')
+                key = 'model' if 'model' in ed_sd else 'state_dict' if 'state_dict' in ed_sd else None
+                if key is not None:
+                    ed_sd = ed_sd[key]
+                # remap known naming differences if necessary (keep same keys that exist)
+                sam_sd = sam.state_dict()
+                ed_filtered = {k: v for k, v in ed_sd.items() if k in sam_sd and sam_sd[k].shape == v.shape}
+                if ed_filtered:
+                    sam.load_state_dict(ed_filtered, strict=False)
+                    print(f"Loaded {len(ed_filtered)} params from EdgeTAM for RepViT.")
+            else:
+                print(f"EdgeTAM checkpoint not found at {edgetam_path}. Skipping advanced warm-start.")
     sam_embed_dim = cfg.model.image_encoder.neck.backbone_channel_list[::-1][1:]
 
     # build Conditional Memory Encoder

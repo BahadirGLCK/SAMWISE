@@ -30,6 +30,8 @@ def get_args_parser():
                         help="Disable predicted object score")
     parser.add_argument('--motion_prompt', default=False, action='store_true',
                         help="Enable motion-based prompting")
+    parser.add_argument('--use_edgetam_weights', default=False, action='store_true',
+                        help="When using --sam2_version repvit, warm-start SAM heads/memory from EdgeTAM edgetam.pt")
 
     # Cross Modal Temporal Adapter settings
     parser.add_argument('--HSA', action='store_true', default=False,
