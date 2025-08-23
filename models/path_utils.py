@@ -11,7 +11,9 @@ SAM2_WEIGHTS_URL = {
 SAM2_PATHS_CONFIG = {
     'tiny':  ('pretrain/sam2_hiera_tiny.pt', 'sam2_configs/sam2_hiera_t.yaml'),
     'base':  ('pretrain/sam2_hiera_base_plus.pt', 'sam2_configs/sam2_hiera_b+.yaml'),
-    'large': ('pretrain/sam2_hiera_large.pt', 'sam2_configs/sam2_hiera_l.yaml')
+    'large': ('pretrain/sam2_hiera_large.pt', 'sam2_configs/sam2_hiera_l.yaml'),
+    # RepViT: use custom config; no default SAM2 checkpoint for this backbone
+    'repvit': ('', 'sam2_configs/sam2_repvitt_m1.yaml')
 }
 
 ROBERTA_WEIGHTS_URL = 'https://dl.fbaipublicfiles.com/fairseq/models/roberta.base.tar.gz'

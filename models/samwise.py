@@ -51,7 +51,9 @@ class SAMWISE(nn.Module):
         self.memory_bank = {} # to store all frames memory
 
         self.fusion_stages_txt = fusion_stages_txt
-        self.fusion_stages_vis = sam.image_encoder.trunk.stage_ends
+        # Some backbones (e.g., Hiera) expose `stage_ends` and transformer `blocks` for early fusion.
+        # TIMM backbones (e.g., RepViT) do not. Fall back gracefully.
+        self.fusion_stages_vis = getattr(sam.image_encoder.trunk, 'stage_ends', [])
         self.fusion_stages = fusion_stages
         self.image_size = image_size
 
@@ -264,33 +266,50 @@ class SAMWISE(nn.Module):
         return x
 
     def _early_fusion_stage(self, T, samples, txt, attention_mask):
-        vis = self.sam.image_encoder.trunk.patch_embed(samples)
-        vis = vis + self.sam.image_encoder.trunk._get_pos_embed(vis.shape[1:3])
-        vis_outs = []
-        fusion_stages_vis = [x+1 for x in self.fusion_stages_vis]
+        # If the trunk exposes transformer internals (e.g., Hiera), use early fusion
+        if hasattr(self.sam.image_encoder.trunk, 'patch_embed') and hasattr(self.sam.image_encoder.trunk, 'blocks'):
+            vis = self.sam.image_encoder.trunk.patch_embed(samples)
+            vis = vis + self.sam.image_encoder.trunk._get_pos_embed(vis.shape[1:3])
+            vis_outs = []
+            fusion_stages_vis = [x+1 for x in self.fusion_stages_vis]
 
-        fusion_vis = fusion_stages_vis.copy()
-        fusion_vis.insert(0, 0)
-        fusion_txt = self.fusion_stages_txt.copy()
-        fusion_txt.insert(0, 0)
-        fusion_txt.insert(1,1)
-        for i, (i_v, i_t) in enumerate(zip(fusion_vis[:-1], fusion_txt[:-1])):
-            vis = self.forw_layer_list(i_v, fusion_vis[i+1], self.sam.image_encoder.trunk.blocks, vis)
-            txt = self.forw_layer_list(i_t, fusion_txt[i+1], self.text_encoder.model.encoder.sentence_encoder.layers, txt, attention_mask)
-            if i in self.fusion_stages:
-                v = vis.clone()
-                t = txt.clone()
-                v, t = self.cmt_adapters[self.fusion_stages.index(i)](v.permute(0, 3, 1, 2), T, t)
-                vis = vis + v.permute(0, 2, 3, 1)
-                txt = txt + t
+            fusion_vis = fusion_stages_vis.copy()
+            fusion_vis.insert(0, 0)
+            fusion_txt = self.fusion_stages_txt.copy()
+            fusion_txt.insert(0, 0)
+            fusion_txt.insert(1,1)
+            for i, (i_v, i_t) in enumerate(zip(fusion_vis[:-1], fusion_txt[:-1])):
+                vis = self.forw_layer_list(i_v, fusion_vis[i+1], self.sam.image_encoder.trunk.blocks, vis)
+                txt = self.forw_layer_list(i_t, fusion_txt[i+1], self.text_encoder.model.encoder.sentence_encoder.layers, txt, attention_mask)
+                if i in self.fusion_stages:
+                    v = vis.clone()
+                    t = txt.clone()
+                    v, t = self.cmt_adapters[self.fusion_stages.index(i)](v.permute(0, 3, 1, 2), T, t)
+                    vis = vis + v.permute(0, 2, 3, 1)
+                    txt = txt + t
 
-            vis_outs.append(vis.permute(0, 3, 1, 2))
+                vis_outs.append(vis.permute(0, 3, 1, 2))
 
+            txt = txt.permute(1, 0, 2)  # LND -> NLD
+            state = txt[:,0]
+            if T > 1:
+                state = state.repeat_interleave(T, 0)
+
+            if self.motion_prompt:
+                return vis_outs, state, txt
+            return vis_outs, state
+
+        # Fallback path for TIMM backbones (e.g., RepViT): no early fusion, use trunk features directly
+        # Forward full text encoder layers
+        for layer in self.text_encoder.model.encoder.sentence_encoder.layers:
+            txt = layer(txt, encoder_padding_mask=attention_mask)
+        # Collect raw backbone features
+        vis_outs = self.sam.image_encoder.trunk(samples)
+        # Build state from CLS-equivalent (first token) of text
         txt = txt.permute(1, 0, 2)  # LND -> NLD
-        state = txt[:,0]
+        state = txt[:, 0]
         if T > 1:
             state = state.repeat_interleave(T, 0)
-
         if self.motion_prompt:
             return vis_outs, state, txt
         return vis_outs, state
@@ -432,9 +451,11 @@ def build_samwise(args):
     text_encoder_embed_dim = roberta.model.encoder.lm_head.dense.out_features
 
     sam2_weights, sam2_config = SAM2_PATHS_CONFIG[args.sam2_version]
-    if not os.path.isfile(sam2_weights):
-        print(f"Downloading SAM2-{args.sam2_version}")
-        py3_wget.download_file(SAM2_WEIGHTS_URL[args.sam2_version], sam2_weights)
+    # If a weights path is provided, ensure it exists; otherwise skip download/load (e.g., custom backbones like RepViT)
+    if sam2_weights:
+        if not os.path.isfile(sam2_weights):
+            print(f"Downloading SAM2-{args.sam2_version}")
+            py3_wget.download_file(SAM2_WEIGHTS_URL[args.sam2_version], sam2_weights)
     
     # build sam2 image encoder and decoder
     with initialize(version_base=None, config_path="sam2", job_name="test_app"):
@@ -446,8 +467,9 @@ def build_samwise(args):
         cfg.model.fixed_no_obj_ptr = not args.disable_pred_obj_score
         sam = instantiate(cfg.model, _recursive_=True)
 
-    state_dict = torch.load(sam2_weights, map_location="cpu")["model"]
-    sam.load_state_dict(state_dict, strict=False)
+    if sam2_weights:
+        state_dict = torch.load(sam2_weights, map_location="cpu")["model"]
+        sam.load_state_dict(state_dict, strict=False)
     sam_embed_dim = cfg.model.image_encoder.neck.backbone_channel_list[::-1][1:]
 
     # build Conditional Memory Encoder
