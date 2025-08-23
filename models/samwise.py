@@ -475,6 +475,26 @@ def build_samwise(args):
                 k.startswith('image_encoder.trunk') or k.startswith('image_encoder.neck')
             )}
         sam.load_state_dict(state_dict, strict=False)
+
+    # Baseline weight strategy for RepViT: load SAM2 head/decoder/memory from base checkpoint (filter by name & shape)
+    if args.sam2_version == 'repvit':
+        base_weights_path, _ = SAM2_PATHS_CONFIG['base']
+        if not os.path.isfile(base_weights_path):
+            print("Downloading SAM2-base for head initialization")
+            py3_wget.download_file(SAM2_WEIGHTS_URL['base'], base_weights_path)
+        base_sd = torch.load(base_weights_path, map_location="cpu")["model"]
+        # remove backbone/neck weights, keep others
+        base_sd = {k: v for k, v in base_sd.items() if not (
+            k.startswith('image_encoder.trunk') or k.startswith('image_encoder.neck')
+        )}
+        # keep only matching shapes
+        sam_sd = sam.state_dict()
+        filtered = {k: v for k, v in base_sd.items() if k in sam_sd and sam_sd[k].shape == v.shape}
+        if filtered:
+            missing, unexpected = sam.load_state_dict(filtered, strict=False)
+            # optional: print summary
+            if len(filtered) > 0:
+                print(f"Loaded {len(filtered)} head/memory params from SAM2-base for RepViT.")
     sam_embed_dim = cfg.model.image_encoder.neck.backbone_channel_list[::-1][1:]
 
     # build Conditional Memory Encoder
